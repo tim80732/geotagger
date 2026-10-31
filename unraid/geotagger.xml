@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>Geotagger</Name>
+  <Repository>geotagger:latest</Repository>
+  <Registry>https://github.com/tim80732/geotagger</Registry>
+  <Network>bridge</Network>
+  <MyIP/>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/tim80732/geotagger/issues</Support>
+  <Project>https://github.com/tim80732/geotagger</Project>
+  <Overview>Geotags photos from your Dawarich location history (or GPX files). Each photo is matched using its own EXIF timezone. JPG gets GPS in the file, RAW gets a .xmp sidecar. Dry run first, then write. The image is built locally from a git clone: see the README.</Overview>
+  <Category>Tools:Utilities</Category>
+  <WebUI>http://[IP]:[PORT:8000]/</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/tim80732/geotagger/main/unraid/geotagger.xml</TemplateURL>
+  <Icon/>
+  <ExtraParams/>
+  <PostArgs/>
+  <CPUset/>
+  <DonateText/>
+  <DonateLink/>
+  <Requires>Build the image first: git clone https://github.com/tim80732/geotagger /mnt/user/appdata/geotagger/src, then docker build -t geotagger:latest /mnt/user/appdata/geotagger/src</Requires>
+  <Config Name="Web UI port" Target="8000" Default="8790" Mode="tcp" Description="Port for the web page" Type="Port" Display="always" Required="true" Mask="false">8790</Config>
+  <Config Name="Photo library" Target="/photos" Default="" Mode="rw" Description="Folder with your photos. Read-write: GPS is written into JPGs and .xmp sidecars." Type="Path" Display="always" Required="true" Mask="false"></Config>
+  <Config Name="App data" Target="/data" Default="/mnt/user/appdata/geotagger/data" Mode="rw" Description="Jobs, settings, your manual placements, thumbnails" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/geotagger/data</Config>
+  <Config Name="Dawarich URL" Target="DAWARICH_URL" Default="" Mode="" Description="Base URL of Dawarich, e.g. https://dawarich.example.com. Can also be set in the app's Settings page." Type="Variable" Display="always" Required="false" Mask="false"></Config>
+  <Config Name="Dawarich API key" Target="DAWARICH_API_KEY" Default="" Mode="" Description="Dawarich → Account → API key. Can also be set in the app's Settings page." Type="Variable" Display="always" Required="false" Mask="true"></Config>
+  <Config Name="Photo roots" Target="PHOTO_ROOTS" Default="/photos" Mode="" Description="Comma-separated container paths the app may browse. Add a path mapping for each extra library and list it here." Type="Variable" Display="advanced" Required="false" Mask="false">/photos</Config>
+</Container>

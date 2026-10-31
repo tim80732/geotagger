@@ -1,0 +1,4 @@
+# The image is built on Linux: keep LF line endings in the repo and in checkouts
+* text=auto eol=lf
+*.png binary
+*.jpg binary
