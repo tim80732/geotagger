@@ -1,15 +1,15 @@
 <?xml version="1.0"?>
 <Container version="2">
   <Name>Geotagger</Name>
-  <Repository>geotagger:latest</Repository>
-  <Registry>https://github.com/tim80732/geotagger</Registry>
+  <Repository>ghcr.io/tim80732/geotagger:latest</Repository>
+  <Registry>https://github.com/tim80732/geotagger/pkgs/container/geotagger</Registry>
   <Network>bridge</Network>
   <MyIP/>
   <Shell>sh</Shell>
   <Privileged>false</Privileged>
   <Support>https://github.com/tim80732/geotagger/issues</Support>
   <Project>https://github.com/tim80732/geotagger</Project>
-  <Overview>Geotags photos from your Dawarich location history (or GPX files). Each photo is matched using its own EXIF timezone. JPG gets GPS in the file, RAW gets a .xmp sidecar. Dry run first, then write. The image is built locally from a git clone: see the README.</Overview>
+  <Overview>Geotags photos from your Dawarich location history (or GPX files). Each photo is matched using its own EXIF timezone. JPG gets GPS in the file, RAW gets a .xmp sidecar. Dry run first, then write.</Overview>
   <Category>Tools:Utilities</Category>
   <WebUI>http://[IP]:[PORT:8000]/</WebUI>
   <TemplateURL>https://raw.githubusercontent.com/tim80732/geotagger/main/unraid/geotagger.xml</TemplateURL>
@@ -19,7 +19,7 @@
   <CPUset/>
   <DonateText/>
   <DonateLink/>
-  <Requires>Build the image first: git clone https://github.com/tim80732/geotagger /mnt/user/appdata/geotagger/src, then docker build -t geotagger:latest /mnt/user/appdata/geotagger/src</Requires>
+  <Requires/>
   <Config Name="Web UI port" Target="8000" Default="8790" Mode="tcp" Description="Port for the web page" Type="Port" Display="always" Required="true" Mask="false">8790</Config>
   <Config Name="Photo library" Target="/photos" Default="" Mode="rw" Description="Folder with your photos. Read-write: GPS is written into JPGs and .xmp sidecars." Type="Path" Display="always" Required="true" Mask="false"></Config>
   <Config Name="App data" Target="/data" Default="/mnt/user/appdata/geotagger/data" Mode="rw" Description="Jobs, settings, your manual placements, thumbnails" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/geotagger/data</Config>

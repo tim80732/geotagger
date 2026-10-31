@@ -25,37 +25,25 @@ Videos are not tagged.
 
 ## Install on Unraid
 
-The image is built on the server from this repository.
-
-1. In a terminal on the server:
+1. In a terminal on the server, download the template:
 
    ```bash
-   git clone https://github.com/tim80732/geotagger /mnt/user/appdata/geotagger/src
-   docker build -t geotagger:latest /mnt/user/appdata/geotagger/src
    wget -O /boot/config/plugins/dockerMan/templates-user/my-Geotagger.xml https://raw.githubusercontent.com/tim80732/geotagger/main/unraid/geotagger.xml
    ```
 
 2. Docker tab → **Add Container** → pick **Geotagger** from the template list.
 3. Set **Photo library** to the share with your photos. Fill in the **Dawarich URL** and **API key** here, or later in the app's Settings page.
-4. Apply, then open the WebUI. Turn on **autostart** for the container (the update script below recreates it, and Unraid only starts containers that have autostart on).
+4. Apply, then open the WebUI.
 
-### Updating
-
-```bash
-bash /mnt/user/appdata/geotagger/src/unraid/deploy.sh
-```
-
-It refuses to run while a job is scanning or writing. Otherwise it pulls the latest code, rebuilds the image and recreates the container. Settings, jobs and manual pins are in the app data folder and are kept.
+The template is kept on the flash drive, so it survives reboots. Updates show up on the Docker tab like any other container. Settings, jobs and manual pins are in the app data folder and are kept. An update during a write interrupts it; resume the job afterwards.
 
 ## Any Docker host
 
 ```bash
-git clone https://github.com/tim80732/geotagger && cd geotagger
-docker build -t geotagger:latest .
 docker run -d --name geotagger -p 8790:8000 \
   -v /path/to/photos:/photos -v /path/to/appdata:/data \
   -e DAWARICH_URL=https://dawarich.example.com -e DAWARICH_API_KEY=... \
-  geotagger:latest
+  ghcr.io/tim80732/geotagger:latest
 ```
 
 The container runs as `99:100` (Unraid's `nobody:users`). On other systems, add `--user <uid>:<gid>` matching the owner of your photos.
@@ -93,9 +81,11 @@ Writing rewrites each JPG in place, so a big batch on slow or nearly full storag
 | `app/exif.py` | A long-running ExifTool process (`-stay_open`) |
 | `app/db.py` | SQLite: jobs, photos, manual pins, what was written |
 | `static/` | Web UI (plain JavaScript, Leaflet, OpenStreetMap tiles) |
-| `unraid/` | Unraid template and update script |
+| `unraid/` | Unraid template |
 
 Uses [ExifTool](https://exiftool.org/) by Phil Harvey for all reading and writing of metadata.
+
+To build the image yourself: `docker build -t geotagger .` in this folder. Releases are built by GitHub Actions: pushing a tag like `v1.0.0` pushes the image to `ghcr.io/tim80732/geotagger` (`:1.0.0` and `:latest`).
 
 ## License
 
