@@ -152,7 +152,7 @@ def delete_gpx(gid: int):
 # ---------------------------------------------------------------- browse
 def count_files(folder):
     """Files directly in the folder, and in it plus all its subfolders (hidden ones left out, as in a dry run)."""
-    here = {'jpg': 0, 'raw': 0, 'mov': 0, 'other': 0}
+    here = {'jpg': 0, 'raw': 0}
     deep = dict(here)
     for root, dirs, names in os.walk(folder):
         dirs[:] = [d for d in dirs if not d.startswith('.')]
@@ -162,10 +162,6 @@ def count_files(folder):
                 k = 'jpg'
             elif ext in RAW_EXT:
                 k = 'raw'
-            elif ext in ('.mov', '.mp4', '.m4v', '.avi', '.mts'):
-                k = 'mov'
-            elif ext not in ('.xmp',):
-                k = 'other'
             else:
                 continue
             deep[k] += 1

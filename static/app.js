@@ -161,7 +161,6 @@ async function viewNew(view) {
     const parts = [];
     if (c.jpg) parts.push(`${n(c.jpg)} JPG`);
     if (c.raw) parts.push(`${n(c.raw)} RAW`);
-    if (c.mov) parts.push(`${n(c.mov)} videos · not supported`);
     return parts.join(' · ') || 'no photos';
   }
   function folderRow(path, label, both, openable) {
