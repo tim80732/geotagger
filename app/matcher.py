@@ -3,6 +3,16 @@ import bisect
 import math
 
 
+SAME_SPOT = 2e-6     # degrees (about 20 cm): a position written to 6 decimals reads back within this
+
+
+def same_spot(cur, target):
+    """Whether a position read from a file is the one Geotagger writes for target (rounded to 6 decimals).
+    The dry run, the write and the read-back check all use this one rule."""
+    return (None not in (cur[0], cur[1], target[0], target[1])
+            and abs(cur[0] - round(target[0], 6)) <= SAME_SPOT and abs(cur[1] - round(target[1], 6)) <= SAME_SPOT)
+
+
 def distance_m(lat1, lon1, lat2, lon2):
     r = math.pi / 180
     a = (math.sin((lat2 - lat1) * r / 2) ** 2 +
@@ -97,8 +107,7 @@ def decide(ph, has_gps_policy, manual):
     # what is in the file now already equals the target: nothing to write
     current = ph.get('side_lat') if ph['kind'] == 'raw' else ph.get('cam_lat')
     current_lon = ph.get('side_lon') if ph['kind'] == 'raw' else ph.get('cam_lon')
-    ph['written'] = 1 if (ph['action'] == 'write' and current is not None and
-                          abs(current - ph['t_lat']) < 1e-6 and abs(current_lon - ph['t_lon']) < 1e-6) else 0
+    ph['written'] = 1 if ph['action'] == 'write' and same_spot((current, current_lon), (ph['t_lat'], ph['t_lon'])) else 0
     return ph
 
 

@@ -7,6 +7,7 @@ import time
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -99,7 +100,8 @@ async def test_connection(request: Request):
     if not url or not key:
         return {'ok': False, 'message': 'Enter the Dawarich URL and API key first.'}
     try:
-        return track.test_dawarich(url, key)
+        # on a worker thread: a slow Dawarich must not stall every other request
+        return await run_in_threadpool(track.test_dawarich, url, key)
     except Exception as e:                                   # noqa: BLE001
         return {'ok': False, 'message': str(e)}
 
@@ -129,7 +131,7 @@ async def upload_gpx(files: list[UploadFile]):
         with open(path, 'wb') as out:
             out.write(await f.read())
         try:
-            pts = track.parse_gpx(path)
+            pts = await run_in_threadpool(track.parse_gpx, path)
         except Exception as e:                               # noqa: BLE001
             os.remove(path)
             db.x('DELETE FROM gpx WHERE id = ?', (gid,))

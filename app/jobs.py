@@ -209,8 +209,7 @@ class Runner:
                 w = written.get(ph['target'])
                 cur_lat = ph['side_lat'] if k == 'raw' else ph['cam_lat']
                 cur_lon = ph['side_lon'] if k == 'raw' else ph['cam_lon']
-                ph['ours'] = 1 if (w and cur_lat is not None and abs(w['lat'] - cur_lat) < 1e-6
-                                   and abs(w['lon'] - cur_lon) < 1e-6) else 0
+                ph['ours'] = 1 if w and matcher.same_spot((cur_lat, cur_lon), (w['lat'], w['lon'])) else 0
                 photos.append(ph)
             self.progress(job_id, min(i + BATCH, total), total, 'Reading photo times')
 
@@ -288,11 +287,12 @@ class Runner:
             # the files as they are now, not as the dry run saw them: another job may have written them since
             meta = {m['SourceFile']: m for m in
                     self.exif.read([ph['target'] for ph in chunk if os.path.exists(ph['target'])], GPS_TAGS)}
-            # remember each Date modified before touching the file (a cut-off photo keeps the one from before)
+            # remember each Date modified, to the nanosecond, before touching the file
+            # (a cut-off photo keeps the one from before it was cut off)
             for ph in chunk:
-                if ph['target'] not in cut_off or ph.get('mtime') is None:
-                    ph['mtime'] = os.stat(ph['target']).st_mtime if os.path.exists(ph['target']) else None
-            self.db.many('UPDATE photos SET mtime = ? WHERE id = ?', [(ph['mtime'], ph['id']) for ph in chunk])
+                if ph['target'] not in cut_off or ph.get('mtime_ns') is None:
+                    ph['mtime_ns'] = os.stat(ph['target']).st_mtime_ns if os.path.exists(ph['target']) else None
+            self.db.many('UPDATE photos SET mtime_ns = ? WHERE id = ?', [(ph['mtime_ns'], ph['id']) for ph in chunk])
             for ph in chunk:
                 flag = self.flags.get(job_id)
                 if flag == 'pause':
@@ -307,21 +307,34 @@ class Runner:
                     self.db.update_job(job_id, status='cancelled', phase='Cancelled', finished=time.time(), result=result)
                     return
                 cur = current_gps(meta.get(ph['target'], {}), ph['kind'])
-                if same_spot(cur, (round(ph['t_lat'], 6), round(ph['t_lon'], 6)), 2e-6):
+                if matcher.same_spot(cur, (ph['t_lat'], ph['t_lon'])):
                     ok, msg = True, ''                  # already has this position: rewriting it changes nothing
                     result['unchanged'] = result.get('unchanged', 0) + 1
                 else:
                     new = not os.path.exists(ph['target'])
-                    ok, msg = self.exif.write(ph['target'], gps_args(ph), common)
+                    try:
+                        ok, msg = self.exif.write(ph['target'], gps_args(ph), common)
+                    except (TimeoutError, RuntimeError) as e:  # stuck or crashed on this photo: note it, go on
+                        ok, msg = False, str(e)
+                        if os.path.exists(ph['target'] + TMP_SUFFIX):
+                            cut_off.add(ph['target'])
+                            result['cut_off'] = sorted(cut_off)
+                            msg += (f'. It stopped in the middle of this photo: a temporary file ending in {TMP_SUFFIX} '
+                                    f'is next to it. If the photo looks right all the way to the bottom, delete the '
+                                    f'temporary file; if not, replace the photo with it. Then write again.')
                     if ok and new and os.geteuid() == 0:     # a new sidecar belongs to whoever owns the photo
                         st = os.stat(ph['path'])
                         os.chown(ph['target'], st.st_uid, st.st_gid)
-                if ok and ph['target'] in cut_off:
+                # exiftool -P keeps Date modified only to the second, and a cut-off photo has lost it: put back
+                # the exact time recorded before the write
+                if ok and ph.get('mtime_ns') is not None:
                     try:
-                        if ph.get('mtime') is not None:
-                            os.utime(ph['target'], (os.stat(ph['target']).st_atime, ph['mtime']))
+                        st = os.stat(ph['target'])
+                        if st.st_mtime_ns != ph['mtime_ns']:
+                            os.utime(ph['target'], ns=(st.st_atime_ns, ph['mtime_ns']))
                     except OSError:
                         msg += '\nError setting file time'
+                if ok and ph['target'] in cut_off:
                     cut_off.discard(ph['target'])
                     result['cut_off'] = sorted(cut_off)
                 if ok and 'Error setting file time' in msg:
@@ -352,7 +365,7 @@ class Runner:
             meta = {m['SourceFile']: m for m in self.exif.read([r['target'] for r in chunk], GPS_TAGS)}
             for r in chunk:
                 cur = current_gps(meta.get(r['target'], {}), r['kind'])
-                if not same_spot(cur, (round(r['t_lat'], 6), round(r['t_lon'], 6)), 2e-6):
+                if not matcher.same_spot(cur, (r['t_lat'], r['t_lon'])):
                     bad += 1
                     self.db.x('UPDATE photos SET written = 0, write_error = ? WHERE id = ?',
                               ('GPS read back does not match', r['id']))
@@ -385,10 +398,6 @@ def current_gps(m, kind):
         return _num(m.get('XMP:GPSLatitude')), _num(m.get('XMP:GPSLongitude'))
     return exif_gps(m)
 
-
-def same_spot(cur, target, tol):
-    return (cur[0] is not None and cur[1] is not None
-            and abs(cur[0] - target[0]) <= tol and abs(cur[1] - target[1]) <= tol)
 
 
 def gps_args(ph):

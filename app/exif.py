@@ -1,13 +1,16 @@
 """A long-running exiftool process (-stay_open), so each command costs no Perl start-up."""
 import json
 import os
+import select
 import subprocess
 import threading
+import time
 
 
 class ExifTool:
-    def __init__(self, exe='exiftool'):
+    def __init__(self, exe='exiftool', timeout=120):
         self.exe = exe
+        self.timeout = timeout             # seconds one command may take; generous, as a sleeping disk spins up first
         self.lock = threading.Lock()
         self.proc = None
         self.n = 0
@@ -23,14 +26,20 @@ class ExifTool:
     def _drain_stderr(self, proc):
         while True:
             chunk = os.read(proc.stderr.fileno(), 65536)
-            if not chunk:
+            if not chunk or proc is not self.proc:     # ended, or a stuck process that was replaced
                 return
             with self._err_cv:
                 self._err += chunk
                 self._err_cv.notify_all()
 
+    def _kill(self):
+        self.proc.kill()
+        self.proc.wait()
+        self.proc = None
+
     def run(self, args):
-        """Run one command; returns (stdout bytes, stderr text)."""
+        """Run one command; returns (stdout bytes, stderr text). An exiftool that doesn't answer within
+        the time limit is killed (the next command starts a fresh one) and TimeoutError is raised."""
         with self.lock:
             if not self.proc or self.proc.poll() is not None:
                 self._start()
@@ -39,10 +48,14 @@ class ExifTool:
             lines = [*args, '-echo4', f'{{ready{self.n}}}', f'-execute{self.n}']
             self.proc.stdin.write(('\n'.join(lines) + '\n').encode('utf-8'))
             self.proc.stdin.flush()
+            deadline = time.monotonic() + self.timeout
 
             out = b''
             fd = self.proc.stdout.fileno()
             while not out.rstrip().endswith(marker):
+                if not select.select([fd], [], [], max(0, deadline - time.monotonic()))[0]:
+                    self._kill()
+                    raise TimeoutError(f'exiftool did not finish within {self.timeout} s and was restarted')
                 chunk = os.read(fd, 1 << 20)
                 if not chunk:
                     raise RuntimeError('exiftool stopped unexpectedly')
@@ -52,7 +65,7 @@ class ExifTool:
             with self._err_cv:
                 while marker not in self._err:
                     self._err_cv.wait(5)
-                    if self.proc.poll() is not None:
+                    if self.proc.poll() is not None or time.monotonic() > deadline:
                         break
                 err, _, rest = self._err.partition(marker)
                 self._err = rest.lstrip(b'\r\n')

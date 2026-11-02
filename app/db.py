@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS photos (
     frozen INTEGER DEFAULT 0, cam_diff_m REAL,
     manual INTEGER DEFAULT 0, action TEXT, t_lat REAL, t_lon REAL, t_alt REAL, reason TEXT,
     written INTEGER DEFAULT 0, write_error TEXT,
-    mtime REAL              -- the target's Date modified just before it was written
+    mtime_ns INTEGER        -- the target's Date modified just before it was written, in nanoseconds
 );
 CREATE INDEX IF NOT EXISTS ix_photos_job ON photos (job_id, name);
 
@@ -45,10 +45,10 @@ class DB:
         with self.lock:
             self.conn.execute('PRAGMA journal_mode=WAL')
             self.conn.executescript(SCHEMA)
-            # columns added after 1.0.0
+            # columns added after 1.0.0 (1.1.0 also added mtime REAL, unused since: a REAL can't hold nanoseconds)
             cols = {r[1] for r in self.conn.execute('PRAGMA table_info(photos)')}
-            if 'mtime' not in cols:
-                self.conn.execute('ALTER TABLE photos ADD COLUMN mtime REAL')
+            if 'mtime_ns' not in cols:
+                self.conn.execute('ALTER TABLE photos ADD COLUMN mtime_ns INTEGER')
 
     def q(self, sql, args=()):
         with self.lock:
