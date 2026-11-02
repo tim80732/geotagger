@@ -125,8 +125,8 @@ function sideFoot() {
 }
 
 // ---------------------------------------------------------------- 1. choose photos
-const OPTION_KEYS = ['source', 'max_gap_min', 'nearest_min', 'max_accuracy_m', 'warn_km', 'frozen_min',
-  'has_gps', 'backups', 'no_tz', 'assume_offset'];
+const OPTION_KEYS = ['source', 'subfolders', 'max_gap_min', 'nearest_min', 'max_accuracy_m', 'warn_km', 'frozen_min',
+  'has_gps', 'no_tz', 'assume_offset'];
 let NEW = null;   // kept while moving between pages
 
 async function viewNew(view) {
@@ -155,6 +155,8 @@ async function viewNew(view) {
   }
 
   const typeOk = (c) => (st.types !== 'raw' && c.jpg) || (st.types !== 'jpg' && c.raw);
+  // counts for a folder: only its own files, or with its subfolders too
+  const pick = (both) => (st.opts.subfolders ? both.deep : both.counts);
   function countText(c) {
     const parts = [];
     if (c.jpg) parts.push(`${n(c.jpg)} JPG`);
@@ -162,12 +164,13 @@ async function viewNew(view) {
     if (c.mov) parts.push(`${n(c.mov)} videos · not supported`);
     return parts.join(' · ') || 'no photos';
   }
-  function folderRow(path, label, counts, openable) {
+  function folderRow(path, label, both, openable) {
     const sel = st.selected.has(path);
+    const counts = pick(both);
     const usable = typeOk(counts);
     return h('div', { class: 'folder' + (sel ? ' sel' : ''), role: 'listitem' },
       h('input', { type: 'checkbox', checked: sel, disabled: !usable && !sel, 'aria-label': `Select ${label}`,
-        onchange: (e) => { if (e.target.checked) st.selected.set(path, counts); else st.selected.delete(path); drawList(); } }),
+        onchange: (e) => { if (e.target.checked) st.selected.set(path, both); else st.selected.delete(path); drawList(); } }),
       openable ? h('button', { class: 'open', type: 'button', onclick: () => load(path) }, label)
         : h('span', { class: 'open', style: 'cursor:default' }, label),
       h('span', { class: 'counts' }, countText(counts)));
@@ -176,15 +179,22 @@ async function viewNew(view) {
     const rows = [];
     if (listing.parent) rows.push(h('div', { class: 'folder' }, h('span', { style: 'width:20px' }),
       h('button', { class: 'open', type: 'button', onclick: () => load(listing.parent) }, '.. (up)')));
-    if (listing.here.jpg || listing.here.raw) rows.push(folderRow(listing.path, '(this folder)', listing.here, false));
-    for (const d of listing.dirs) rows.push(folderRow(d.path, d.name, d.counts, true));
-    if (!listing.dirs.length && !listing.here.jpg && !listing.here.raw) rows.push(h('div', { class: 'folder muted' }, 'Empty folder'));
+    const here = { counts: listing.here, deep: listing.here_deep };
+    const hereC = pick(here);
+    if (hereC.jpg || hereC.raw) {
+      rows.push(folderRow(listing.path, st.opts.subfolders && listing.dirs.length ? '(this folder and its subfolders)' : '(this folder)', here, false));
+    }
+    for (const d of listing.dirs) rows.push(folderRow(d.path, d.name, d, true));
+    if (!listing.dirs.length && !hereC.jpg && !hereC.raw) rows.push(h('div', { class: 'folder muted' }, 'Empty folder'));
     listEl.replaceChildren(...rows);
     drawSummary();
   }
   function drawSummary() {
     let jpg = 0, raw = 0;
-    for (const c of st.selected.values()) { jpg += st.types !== 'raw' ? c.jpg : 0; raw += st.types !== 'jpg' ? c.raw : 0; }
+    for (const both of st.selected.values()) {
+      const c = pick(both);
+      jpg += st.types !== 'raw' ? c.jpg : 0; raw += st.types !== 'jpg' ? c.raw : 0;
+    }
     runBtn.disabled = !(jpg + raw);
     summaryEl.replaceChildren(
       h('h2', {}, 'Selection'),
@@ -245,7 +255,9 @@ async function viewNew(view) {
             h('span', { class: 'label', id: 'types-l' }, 'File types'),
             h('div', { class: 'seg', role: 'group', 'aria-labelledby': 'types-l' },
               segBtn('jpg', 'JPG'), segBtn('raw', 'RAW'), segBtn('both', 'JPG + RAW')),
-            h('span', { class: 'hint' }, 'JPG: GPS written into the file. RAW: GPS written to a .xmp sidecar next to it — the raw file itself is never changed.'))),
+            h('span', { class: 'hint' }, 'JPG: GPS written into the file. RAW: GPS written to a .xmp sidecar next to it — the raw file itself is never changed.')),
+          h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: !!st.opts.subfolders,
+            onchange: (e) => { st.opts.subfolders = e.target.checked; drawList(); } }), 'Include subfolders')),
         listEl),
       h('section', { class: 'card grow2' }, summaryEl)),
     h('section', { class: 'card', 'aria-labelledby': 'opt-h' },
@@ -258,10 +270,6 @@ async function viewNew(view) {
           num('max_accuracy_m', 'Ignore points less accurate than', 'm'),
           sel('has_gps', 'Photos that already have GPS', [['replace', 'Replace with the track position'], ['keep', 'Keep — only tag photos without GPS']],
             '“Keep” is what Lightroom does. Photos you placed by hand are never replaced.'),
-          h('div', { class: 'field' }, h('span', { class: 'label' }, 'Backups'),
-            h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: !!o.backups, onchange: (e) => { o.backups = e.target.checked; } }),
-              'Keep a copy of each JPG before writing'),
-            h('span', { class: 'hint' }, 'Adds a .JPG_original file per photo (same size as the photo).')),
           sel('no_tz', 'Photos with no timezone', [['skip', 'Skip them'], ['assume', 'Assume an offset']], null, tzField),
           sel('source', 'Track source', [['dawarich', 'Dawarich'], ['gpx', 'Uploaded GPX files']]),
           num('warn_km', 'Warn when camera GPS is off by more than', 'km'),
@@ -368,7 +376,7 @@ async function viewResults(view, job) {
   const writeBtn = h('button', { class: 'btn primary', type: 'button', disabled: busy || !toWrite, onclick: startWrite },
     toWrite ? `Write GPS · ${kinds}` : 'Nothing to write');
   async function startWrite() {
-    const msg = `Write GPS to ${n(toWrite)} files?\n\nJPG: GPS goes into the file.\nRAW: into a .xmp sidecar next to it.\nBackups: ${o.backups ? 'kept' : 'off'}.`;
+    const msg = `Write GPS to ${n(toWrite)} files?\n\nJPG: GPS goes into the file.\nRAW: into a .xmp sidecar next to it.`;
     if (!confirm(msg)) return;
     try { await api(`/jobs/${id}/write`, { method: 'POST' }); render(); } catch (e) { alert(e.message); }
   }
@@ -694,7 +702,7 @@ async function viewResults(view, job) {
 
 function runningCard(job) {
   const bar = h('div'), stats = h('div', { class: 'grid3', style: 'grid-template-columns:repeat(auto-fit,minmax(160px,1fr))' });
-  const kicker = h('div', { class: 'kicker' }), phase = h('span', { class: 'hint' });
+  const kicker = h('div', { class: 'kicker' }), phase = h('span', { class: 'hint' }), err = h('div');
   const pauseBtn = h('button', { class: 'btn', type: 'button' });
   const cancelBtn = h('button', { class: 'btn danger', type: 'button', onclick: async () => {
     if (!confirm('Stop writing? Files already written keep their new GPS.')) return;
@@ -703,7 +711,7 @@ function runningCard(job) {
   const card = h('section', { class: 'card run', 'aria-labelledby': 'run-h' }, h('div', { class: 'card-pad' },
     h('div', { class: 'head' }, h('div', {}, kicker, h('h2', { id: 'run-h', style: 'font-size:18px' }, 'Writing GPS · ', h('span', { class: 'mono' }, folderLine(job)))),
       h('div', { class: 'actions' }, pauseBtn, cancelBtn)),
-    h('div', { class: 'progress', role: 'progressbar', 'aria-label': 'Files written' }, bar), stats, phase));
+    h('div', { class: 'progress', role: 'progressbar', 'aria-label': 'Files written' }, bar), stats, phase, err));
   card.update = (j) => {
     const paused = j.status === 'paused';
     kicker.textContent = paused ? 'Paused' : j.status === 'queued' ? 'Waiting' : 'Running';
@@ -715,6 +723,7 @@ function runningCard(job) {
       h('div', {}, h('div', { class: 'stat-l' }, 'Done at'), h('div', { class: 'stat-v', style: 'font-size:20px' }, paused || left == null ? '—' : `about ${fmtClock(Date.now() + left * 1000)}`)),
       h('div', {}, h('div', { class: 'stat-l' }, 'Speed'), h('div', { class: 'stat-v', style: 'font-size:20px' }, j.rate ? `${j.rate.toFixed(1)} files/s` : '—')));
     phase.textContent = paused ? (j.phase || 'Paused') : 'The estimate follows the speed of the last two minutes. You can close this page — the job keeps running on the server.';
+    err.replaceChildren(paused && j.error ? h('div', { class: 'note err', style: 'margin-top:12px' }, j.error) : '');
     pauseBtn.textContent = paused ? 'Resume' : 'Pause';
     pauseBtn.onclick = async () => { await api(`/jobs/${job.id}/${paused ? 'resume' : 'pause'}`, { method: 'POST' }); if (paused) render(); };
   };
@@ -731,6 +740,7 @@ function doneCard(job) {
       h('h2', {}, `Finished${took}`),
       h('ul', { class: 'checks' },
         li('ok', `GPS in ${n(s.written)} files`),
+        r.unchanged ? li('dash', `${n(r.unchanged)} already had this position, so they weren’t rewritten`) : null,
         li(r.mismatched ? 'warn' : 'ok', `Read back: ${n(r.verified)} match${r.mismatched ? `, ${n(r.mismatched)} don’t` : ''}`),
         li('ok', 'Owner, permissions and file dates unchanged'),
         li(s.errors ? 'warn' : 'dash', s.errors ? `${n(s.errors)} files had errors — see the Errors filter` : 'No write errors'),
@@ -891,9 +901,9 @@ async function viewSettings(view) {
         sel('types', 'File types', [['both', 'JPG + RAW'], ['jpg', 'JPG only'], ['raw', 'RAW only']]),
         sel('has_gps', 'Photos that already have GPS', [['replace', 'Replace with the track position'], ['keep', 'Keep — only tag photos without GPS']]),
         sel('no_tz', 'Photos with no timezone', [['skip', 'Skip them'], ['assume', 'Assume an offset']]),
-        h('div', { class: 'field' }, h('span', { class: 'label' }, 'Backups'),
-          h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: !!s.backups, onchange: (e) => { s.backups = e.target.checked; } }),
-            'Keep a copy of each JPG before writing'))))));
+        h('div', { class: 'field' }, h('span', { class: 'label' }, 'Folders'),
+          h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: !!s.subfolders, onchange: (e) => { s.subfolders = e.target.checked; } }),
+            'Include subfolders'))))));
   drawGpx(gpxList);
 }
 

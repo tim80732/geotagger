@@ -16,6 +16,6 @@ RUN mkdir -p static/vendor \
 
 ENV DATA_DIR=/data PHOTO_ROOTS=/photos PYTHONUNBUFFERED=1
 EXPOSE 8000
-# Unraid's nobody:users, so files it creates match the rest of the array
-USER 99:100
+# Runs as root: only a file's owner (or root) may set its Date modified, and a library has photos owned by
+# several users. New .xmp sidecars are given the owner of their photo.
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]

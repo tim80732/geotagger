@@ -17,8 +17,9 @@ Geotagger reads each photo's own `OffsetTimeOriginal` (`+02:00`, `+08:00` …), 
 - **Flags problems** in the existing camera GPS: a phone-to-camera GPS link that froze and kept stamping the same spot, and camera positions that disagree with the track by more than 1 km.
 - **Track gaps** are left untagged. The **Nearest GPS** button shows the last and next track point around such a photo, so you can place it from there.
 - **Manual pins.** Select photos and click the map, search a place, or drag a pin. Hand-placed positions are kept by later runs. A JPG and its RAW twin are placed together.
-- **Writes** GPS into JPG files, and into a `.xmp` sidecar next to each RAW file. The RAW file itself is never changed. File dates, owner and permissions are kept. Every written file is read back to check it.
+- **Writes** GPS into JPG files, and into a `.xmp` sidecar next to each RAW file. The RAW file itself is never changed. File dates, owner and permissions are kept. Files that already hold the position are left alone, so running an old job again rewrites nothing. Every written file is read back to check it.
 - **Long writes** show progress and time left, and can be paused, resumed or cancelled. A dry run can be cancelled.
+- **Safe to stop.** When the container stops (an update, or a backup plugin stopping all containers), the photo being written is finished first, and the job carries on by itself when the container starts again.
 - **Full-size viewer** with next/previous (arrow keys or swipe), CSV export, phone-friendly layout.
 
 Videos are not tagged.
@@ -35,7 +36,7 @@ Videos are not tagged.
 3. Set **Photo library** to the share with your photos. Fill in the **Dawarich URL** and **API key** here, or later in the app's Settings page.
 4. Apply, then open the WebUI.
 
-The template is kept on the flash drive, so it survives reboots. Updates show up on the Docker tab like any other container. Settings, jobs and manual pins are in the app data folder and are kept. An update during a write interrupts it; resume the job afterwards.
+The template is kept on the flash drive, so it survives reboots. Updates show up on the Docker tab like any other container. Settings, jobs and manual pins are in the app data folder and are kept. An update during a write pauses it after the current photo, and the job carries on when the new version starts.
 
 ## Any Docker host
 
@@ -46,7 +47,7 @@ docker run -d --name geotagger -p 8790:8000 \
   ghcr.io/tim80732/geotagger:latest
 ```
 
-The container runs as `99:100` (Unraid's `nobody:users`). On other systems, add `--user <uid>:<gid>` matching the owner of your photos.
+The container runs as root, because only a file's owner or root may set its Date modified, and photos copied in by different users have different owners. New `.xmp` sidecars get the owner of their photo. You can run it as a normal user with `--user <uid>:<gid>` (the app data folder must be writable by that user), but then photos owned by anyone else get GPS with today's Date modified; those are listed under Errors.
 
 The web UI has no login: keep it on your LAN and don't forward the port.
 
@@ -61,14 +62,16 @@ Dawarich URL and key can also be set (and tested) in the Settings page, which al
 
 ## Using it
 
-1. **New job:** pick one or more folders, choose JPG, RAW or both, adjust the options if needed.
+1. **New job:** pick one or more folders (with their subfolders, unless you untick **Include subfolders**), choose JPG, RAW or both, adjust the options if needed.
 2. **Review the dry run.** Check the warnings, place photos that fell into track gaps, exclude photos you don't want tagged.
 3. **Write GPS.**
 4. **Lightroom:** select the photos → **Metadata → Read Metadata from Files**. No timezone offset needed. If you edited the photos' metadata in Lightroom, save it to the files (Ctrl+S) before writing, or reading the files back replaces Lightroom's unsaved changes.
 
 Photos without a timezone in their EXIF are skipped by default, or can be read with an offset you choose.
 
-Writing rewrites each JPG in place, so a big batch on slow or nearly full storage takes a while. Tagging RAW files only writes small `.xmp` sidecars and is quick.
+Writing rewrites each JPG in place, so a big batch on slow or nearly full storage takes a while. Tagging RAW files only writes small `.xmp` sidecars and is quick. Geotagger keeps no copies of your photos: have a backup of the library.
+
+If the container is killed in the middle of a photo (power loss, or a stop that takes longer than Docker waits), the job stays paused when it starts again and names the photo. Its Date modified is put back when the job resumes. Next to it is an exiftool temporary file ending in `_exiftool_tmp`. If the photo looks right all the way to the bottom, delete the temporary file. If not, replace the photo with the temporary file (remove `_exiftool_tmp` from its name). Then resume.
 
 ## How it's built
 

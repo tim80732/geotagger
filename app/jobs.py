@@ -12,10 +12,12 @@ from . import matcher, track
 
 JPG_EXT = {'.jpg', '.jpeg'}
 RAW_EXT = {'.raf', '.dng', '.cr2', '.cr3', '.nef', '.arw', '.orf', '.rw2', '.pef', '.srw'}
-READ_TAGS = ['EXIF:DateTimeOriginal', 'EXIF:SubSecTimeOriginal', 'EXIF:OffsetTimeOriginal',
-             'EXIF:GPSLatitude', 'EXIF:GPSLongitude', 'XMP:GPSLatitude', 'XMP:GPSLongitude',
+GPS_TAGS = ['EXIF:GPSLatitude', 'EXIF:GPSLatitudeRef', 'EXIF:GPSLongitude', 'EXIF:GPSLongitudeRef',
+            'XMP:GPSLatitude', 'XMP:GPSLongitude']
+READ_TAGS = ['EXIF:DateTimeOriginal', 'EXIF:SubSecTimeOriginal', 'EXIF:OffsetTimeOriginal', *GPS_TAGS,
              'XMP:DateTimeOriginal']
 BATCH = 200
+TMP_SUFFIX = '_exiftool_tmp'      # exiftool's temporary file while it rewrites a photo
 
 PHOTO_COLS = ['job_id', 'path', 'name', 'kind', 'target', 'dto', 'tz', 'utc', 'cam_lat', 'cam_lon',
               'side_lat', 'side_lon', 'has_xmp_gps', 'ours', 'm_status', 'm_lat', 'm_lon', 'm_alt',
@@ -61,14 +63,60 @@ class Runner:
     def __init__(self, db, exif, settings_fn, data_dir):
         self.db, self.exif, self.settings, self.data_dir = db, exif, settings_fn, data_dir
         self.q = queue.Queue()
-        self.flags = {}                    # job_id -> 'pause' | 'cancel'
+        self.flags = {}                    # job_id -> 'pause' | 'cancel' | 'shutdown'
+        self.current = None                # (job_id, kind) while a job runs
         self.rates = collections.defaultdict(lambda: collections.deque(maxlen=400))
-        # a job that was running when the container stopped
-        for j in db.q("SELECT id, status FROM jobs WHERE status IN ('scanning', 'writing', 'queued')"):
-            db.update_job(j['id'], status='failed' if j['status'] != 'writing' else 'paused',
-                          error='Interrupted by a restart' if j['status'] != 'writing' else None,
-                          phase='Interrupted by a restart — resume to continue')
+        self._recover()
         threading.Thread(target=self._loop, daemon=True).start()
+
+    def _recover(self):
+        """Jobs that were running when the container stopped. A write that was stopped cleanly, or killed
+        between two files, carries on by itself; one killed in the middle of a file waits for you."""
+        for j in self.db.q("SELECT id, status, result FROM jobs WHERE status IN ('scanning', 'writing', 'queued', 'paused')"):
+            result = json.loads(j['result']) if j['result'] else {}
+            if j['status'] == 'paused' and not result.pop('resume_on_start', False):
+                continue                                # paused by you
+            if j['status'] in ('scanning', 'queued'):
+                self.db.update_job(j['id'], status='failed', error='Interrupted by a restart',
+                                   phase='Interrupted by a restart — resume to continue')
+                continue
+            left = self._leftovers(j['id'])
+            # a photo cut off while it was being copied back has lost its Date modified; the next write puts it back
+            result['cut_off'] = sorted(set(result.get('cut_off', [])) | {p[:-len(TMP_SUFFIX)] for p in left})
+            if left:
+                names = ', '.join(os.path.basename(p)[:-len(TMP_SUFFIX)] for p in left[:5])
+                more = f' and {len(left) - 5} more' if len(left) > 5 else ''
+                self.db.update_job(
+                    j['id'], status='paused', result=result, phase='Stopped in the middle of a photo — check it before resuming',
+                    error=f'Writing was cut off in the middle of {names}{more}. Next to each is an exiftool temporary file '
+                          f'(name ending in {TMP_SUFFIX}). If the photo looks right all the way to the bottom, delete the '
+                          f'temporary file. If not, delete the photo and remove {TMP_SUFFIX} from the temporary file\'s name. '
+                          f'Then resume.')
+            else:
+                self.db.update_job(j['id'], result=result)
+                self.submit(j['id'], 'write')
+
+    def _leftovers(self, job_id):
+        """exiftool temporary files next to this job's photos: a write that was cut off part-way."""
+        dirs = {os.path.dirname(r['target']) for r in
+                self.db.q("SELECT DISTINCT target FROM photos WHERE job_id = ? AND action = 'write'", (job_id,))}
+        out = []
+        for d in dirs:
+            try:
+                out += [os.path.join(d, n) for n in os.listdir(d) if n.endswith(TMP_SUFFIX)]
+            except OSError:
+                pass
+        return sorted(out)
+
+    def shutdown(self, timeout=8):
+        """The container is stopping: finish the photo being written, then stop. Docker kills everything
+        10 s after asking, and a photo cut off half-way through being rewritten is damaged."""
+        if not self.current or self.current[1] != 'write':
+            return
+        self.flags[self.current[0]] = 'shutdown'
+        end = time.time() + timeout
+        while self.current and time.time() < end:
+            time.sleep(0.1)
 
     # ---------------- queue
     def submit(self, job_id, kind):
@@ -79,11 +127,14 @@ class Runner:
     def _loop(self):
         while True:
             job_id, kind = self.q.get()
+            self.current = (job_id, kind)
             try:
                 (self._scan if kind == 'scan' else self._write)(job_id)
             except Exception as e:                       # noqa: BLE001
                 traceback.print_exc()
                 self.db.update_job(job_id, status='failed', error=str(e), finished=time.time())
+            finally:
+                self.current = None
 
     def progress(self, job_id, done, total, phase):
         now = time.time()
@@ -116,13 +167,17 @@ class Runner:
         self.db.update_job(job_id, status='scanning', started=time.time(), error=None)
         self.db.x('DELETE FROM photos WHERE job_id = ?', (job_id,))
 
-        files = []
+        files, seen = [], set()
         for folder in job['folders']:
-            for name in sorted(os.listdir(folder)):
-                path = os.path.join(folder, name)
-                k = kind_of(name, job['types'])
-                if k and os.path.isfile(path):
-                    files.append((path, name, k))
+            walk = os.walk(folder) if o.get('subfolders') else [(folder, [], os.listdir(folder))]
+            for root, dirs, names in walk:
+                dirs[:] = sorted(d for d in dirs if not d.startswith('.'))
+                for name in sorted(names):
+                    path = os.path.join(root, name)
+                    k = kind_of(name, job['types'])
+                    if k and path not in seen and os.path.isfile(path):
+                        seen.add(path)
+                        files.append((path, name, k))
         total = len(files)
         self.rates.pop(job_id, None)
         self.progress(job_id, 0, total, 'Reading photo times')
@@ -143,10 +198,11 @@ class Runner:
                                       m.get('EXIF:OffsetTimeOriginal'), o['no_tz'], o.get('assume_offset'))
                 side = sidecars.get(path)
                 sm = side_meta.get(side, {}) if side else {}
+                cam_lat, cam_lon = exif_gps(m)
                 ph = dict(job_id=job_id, path=path, name=name, kind=k,
                           target=(side or os.path.splitext(path)[0] + '.xmp') if k == 'raw' else path,
                           dto=m.get('EXIF:DateTimeOriginal'), tz=tz, utc=utc,
-                          cam_lat=_num(m.get('EXIF:GPSLatitude')), cam_lon=_num(m.get('EXIF:GPSLongitude')),
+                          cam_lat=cam_lat, cam_lon=cam_lon,
                           side_lat=_num(sm.get('XMP:GPSLatitude')), side_lon=_num(sm.get('XMP:GPSLongitude')),
                           has_xmp_gps=1 if m.get('XMP:GPSLatitude') is not None else 0,
                           m_status=bad, frozen=0)
@@ -219,30 +275,69 @@ class Runner:
         total = len(todo) + already
         result = job['result'] or {}
         result.setdefault('write_started', time.time())
+        if not already:
+            result['unchanged'] = 0
         self.db.update_job(job_id, status='writing', error=None, result=result)
         self.rates.pop(job_id, None)
-        common = ['-P'] + ([] if o.get('backups') else ['-overwrite_original_in_place'])
+        common = ['-P', '-overwrite_original_in_place']
         done = already
         self.progress(job_id, done, total, 'Writing GPS')
-        for ph in todo:
-            flag = self.flags.get(job_id)
-            if flag == 'pause':
-                self.db.update_job(job_id, status='paused', phase='Paused')
-                return
-            if flag == 'cancel':
-                self.db.update_job(job_id, status='cancelled', phase='Cancelled', finished=time.time())
-                return
-            ok, msg = self.exif.write(ph['target'], gps_args(ph), common)
-            if ok:
-                self.db.x('UPDATE photos SET written = 1, write_error = NULL WHERE id = ?', (ph['id'],))
-                self.db.x('INSERT INTO written (path, lat, lon, job_id, at) VALUES (?, ?, ?, ?, ?) '
-                          'ON CONFLICT(path) DO UPDATE SET lat = excluded.lat, lon = excluded.lon, '
-                          'job_id = excluded.job_id, at = excluded.at',
-                          (ph['target'], round(ph['t_lat'], 6), round(ph['t_lon'], 6), job_id, time.time()))
-            else:
-                self.db.x('UPDATE photos SET write_error = ? WHERE id = ?', (msg[:500], ph['id']))
-            done += 1
-            self.progress(job_id, done, total, 'Writing GPS')
+        cut_off = set(result.get('cut_off', []))
+        for i in range(0, len(todo), BATCH):
+            chunk = todo[i:i + BATCH]
+            # the files as they are now, not as the dry run saw them: another job may have written them since
+            meta = {m['SourceFile']: m for m in
+                    self.exif.read([ph['target'] for ph in chunk if os.path.exists(ph['target'])], GPS_TAGS)}
+            # remember each Date modified before touching the file (a cut-off photo keeps the one from before)
+            for ph in chunk:
+                if ph['target'] not in cut_off or ph.get('mtime') is None:
+                    ph['mtime'] = os.stat(ph['target']).st_mtime if os.path.exists(ph['target']) else None
+            self.db.many('UPDATE photos SET mtime = ? WHERE id = ?', [(ph['mtime'], ph['id']) for ph in chunk])
+            for ph in chunk:
+                flag = self.flags.get(job_id)
+                if flag == 'pause':
+                    self.db.update_job(job_id, status='paused', phase='Paused', result=result)
+                    return
+                if flag == 'shutdown':
+                    result['resume_on_start'] = True
+                    self.db.update_job(job_id, status='paused', result=result,
+                                       phase='Stopped because the container stopped — carries on when it starts')
+                    return
+                if flag == 'cancel':
+                    self.db.update_job(job_id, status='cancelled', phase='Cancelled', finished=time.time(), result=result)
+                    return
+                cur = current_gps(meta.get(ph['target'], {}), ph['kind'])
+                if same_spot(cur, (round(ph['t_lat'], 6), round(ph['t_lon'], 6)), 2e-6):
+                    ok, msg = True, ''                  # already has this position: rewriting it changes nothing
+                    result['unchanged'] = result.get('unchanged', 0) + 1
+                else:
+                    new = not os.path.exists(ph['target'])
+                    ok, msg = self.exif.write(ph['target'], gps_args(ph), common)
+                    if ok and new and os.geteuid() == 0:     # a new sidecar belongs to whoever owns the photo
+                        st = os.stat(ph['path'])
+                        os.chown(ph['target'], st.st_uid, st.st_gid)
+                if ok and ph['target'] in cut_off:
+                    try:
+                        if ph.get('mtime') is not None:
+                            os.utime(ph['target'], (os.stat(ph['target']).st_atime, ph['mtime']))
+                    except OSError:
+                        msg += '\nError setting file time'
+                    cut_off.discard(ph['target'])
+                    result['cut_off'] = sorted(cut_off)
+                if ok and 'Error setting file time' in msg:
+                    self.db.x('UPDATE photos SET written = 1, write_error = ? WHERE id = ?',
+                              ('GPS written, but its Date modified could not be kept', ph['id']))
+                elif ok:
+                    self.db.x('UPDATE photos SET written = 1, write_error = NULL WHERE id = ?', (ph['id'],))
+                if ok:
+                    self.db.x('INSERT INTO written (path, lat, lon, job_id, at) VALUES (?, ?, ?, ?, ?) '
+                              'ON CONFLICT(path) DO UPDATE SET lat = excluded.lat, lon = excluded.lon, '
+                              'job_id = excluded.job_id, at = excluded.at',
+                              (ph['target'], round(ph['t_lat'], 6), round(ph['t_lon'], 6), job_id, time.time()))
+                else:
+                    self.db.x('UPDATE photos SET write_error = ? WHERE id = ?', (msg[:500], ph['id']))
+                done += 1
+                self.progress(job_id, done, total, 'Writing GPS')
 
         self.db.update_job(job_id, phase='Checking what was written')
         result.update(self._verify(job_id))
@@ -254,14 +349,10 @@ class Runner:
         bad = 0
         for i in range(0, len(rows), BATCH):
             chunk = rows[i:i + BATCH]
-            meta = {m['SourceFile']: m for m in self.exif.read([r['target'] for r in chunk],
-                                                               ['EXIF:GPSLatitude', 'EXIF:GPSLongitude',
-                                                                'XMP:GPSLatitude', 'XMP:GPSLongitude'])}
+            meta = {m['SourceFile']: m for m in self.exif.read([r['target'] for r in chunk], GPS_TAGS)}
             for r in chunk:
-                m = meta.get(r['target'], {})
-                g = 'XMP' if r['kind'] == 'raw' else 'EXIF'
-                lat, lon = _num(m.get(f'{g}:GPSLatitude')), _num(m.get(f'{g}:GPSLongitude'))
-                if lat is None or abs(lat - round(r['t_lat'], 6)) > 2e-6 or abs(lon - round(r['t_lon'], 6)) > 2e-6:
+                cur = current_gps(meta.get(r['target'], {}), r['kind'])
+                if not same_spot(cur, (round(r['t_lat'], 6), round(r['t_lon'], 6)), 2e-6):
                     bad += 1
                     self.db.x('UPDATE photos SET written = 0, write_error = ? WHERE id = ?',
                               ('GPS read back does not match', r['id']))
@@ -275,6 +366,29 @@ def _num(v):
         return float(v) if v not in (None, '') else None
     except (TypeError, ValueError):
         return None
+
+
+def exif_gps(m):
+    """Signed EXIF GPS from an exiftool -n read. EXIF stores the numbers without a sign;
+    south and west are only in GPSLatitudeRef / GPSLongitudeRef."""
+    lat, lon = _num(m.get('EXIF:GPSLatitude')), _num(m.get('EXIF:GPSLongitude'))
+    if lat is not None and str(m.get('EXIF:GPSLatitudeRef', '')).upper().startswith('S'):
+        lat = -lat
+    if lon is not None and str(m.get('EXIF:GPSLongitudeRef', '')).upper().startswith('W'):
+        lon = -lon
+    return lat, lon
+
+
+def current_gps(m, kind):
+    """What a target holds now: XMP for a RAW's sidecar (already signed), EXIF for a JPG."""
+    if kind == 'raw':
+        return _num(m.get('XMP:GPSLatitude')), _num(m.get('XMP:GPSLongitude'))
+    return exif_gps(m)
+
+
+def same_spot(cur, target, tol):
+    return (cur[0] is not None and cur[1] is not None
+            and abs(cur[0] - target[0]) <= tol and abs(cur[1] - target[1]) <= tol)
 
 
 def gps_args(ph):

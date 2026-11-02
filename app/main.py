@@ -30,11 +30,11 @@ DEFAULTS = {
     'photon_url': os.environ.get('PHOTON_URL', 'https://photon.komoot.io'),
     'max_gap_min': 10, 'nearest_min': 2, 'max_accuracy_m': 100,
     'warn_km': 1, 'frozen_min': 30,
-    'types': 'both', 'has_gps': 'replace', 'backups': False,
+    'types': 'both', 'subfolders': True, 'has_gps': 'replace',
     'no_tz': 'skip', 'assume_offset': '+02:00',
 }
-OPTION_KEYS = ['source', 'max_gap_min', 'nearest_min', 'max_accuracy_m', 'warn_km', 'frozen_min',
-               'has_gps', 'backups', 'no_tz', 'assume_offset']
+OPTION_KEYS = ['source', 'subfolders', 'max_gap_min', 'nearest_min', 'max_accuracy_m', 'warn_km', 'frozen_min',
+               'has_gps', 'no_tz', 'assume_offset']
 
 db = DB(os.path.join(DATA, 'geotagger.db'))
 exif = ExifTool()          # jobs
@@ -47,6 +47,11 @@ def settings():
 
 runner = Runner(db, exif, settings, DATA)
 app = FastAPI(title='Geotagger')
+
+
+@app.on_event('shutdown')
+def stop_writing():
+    runner.shutdown()
 
 
 @app.middleware('http')
@@ -146,24 +151,27 @@ def delete_gpx(gid: int):
 
 # ---------------------------------------------------------------- browse
 def count_files(folder):
-    c = {'jpg': 0, 'raw': 0, 'mov': 0, 'other': 0}
-    try:
-        with os.scandir(folder) as it:
-            for e in it:
-                if not e.is_file():
-                    continue
-                ext = os.path.splitext(e.name)[1].lower()
-                if ext in JPG_EXT:
-                    c['jpg'] += 1
-                elif ext in RAW_EXT:
-                    c['raw'] += 1
-                elif ext in ('.mov', '.mp4', '.m4v', '.avi', '.mts'):
-                    c['mov'] += 1
-                elif ext not in ('.xmp',):
-                    c['other'] += 1
-    except PermissionError:
-        pass
-    return c
+    """Files directly in the folder, and in it plus all its subfolders (hidden ones left out, as in a dry run)."""
+    here = {'jpg': 0, 'raw': 0, 'mov': 0, 'other': 0}
+    deep = dict(here)
+    for root, dirs, names in os.walk(folder):
+        dirs[:] = [d for d in dirs if not d.startswith('.')]
+        for name in names:
+            ext = os.path.splitext(name)[1].lower()
+            if ext in JPG_EXT:
+                k = 'jpg'
+            elif ext in RAW_EXT:
+                k = 'raw'
+            elif ext in ('.mov', '.mp4', '.m4v', '.avi', '.mts'):
+                k = 'mov'
+            elif ext not in ('.xmp',):
+                k = 'other'
+            else:
+                continue
+            deep[k] += 1
+            if root == folder:
+                here[k] += 1
+    return here, deep
 
 
 @app.get('/api/browse')
@@ -175,11 +183,13 @@ def browse(path: str = ''):
     with os.scandir(path) as it:
         for e in sorted(it, key=lambda e: e.name.lower()):
             if e.is_dir() and not e.name.startswith('.'):
-                dirs.append({'name': e.name, 'path': e.path, 'counts': count_files(e.path)})
+                counts, deep = count_files(e.path)
+                dirs.append({'name': e.name, 'path': e.path, 'counts': counts, 'deep': deep})
     parent = os.path.dirname(path)
     root = next(r for r in ROOTS if path == os.path.realpath(r) or path.startswith(os.path.realpath(r) + os.sep))
+    here, here_deep = count_files(path)
     return {'path': path, 'root': root, 'parent': None if path == os.path.realpath(root) else parent,
-            'here': count_files(path), 'dirs': dirs}
+            'here': here, 'here_deep': here_deep, 'dirs': dirs}
 
 
 # ---------------------------------------------------------------- jobs
