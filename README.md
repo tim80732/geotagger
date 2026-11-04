@@ -1,6 +1,6 @@
 # Geotagger
 
-Writes GPS positions into your photos from a [Dawarich](https://github.com/Freika/dawarich) location history, or from GPX files. Runs as a small web app in Docker (made for Unraid). Nothing is written until you have looked at the dry run and clicked **Write GPS**.
+Writes GPS positions into your photos from a [Dawarich](https://github.com/Freika/dawarich) location history, or from GPX files. Runs as a small web app in Docker (made for Unraid). Nothing is written until you have looked at the dry run and clicked **Write GPS**. What's new: [CHANGELOG.md](CHANGELOG.md).
 
 **Built by AI.** The code and docs in this repository were written by Claude (Anthropic's AI model), directed and tested by [@tim80732](https://github.com/tim80732). It's used on a real photo library, but review it yourself before trusting it with files you can't replace, and keep backups.
 
@@ -88,7 +88,7 @@ If the container is killed in the middle of a photo (power loss, or a stop that 
 
 Uses [ExifTool](https://exiftool.org/) by Phil Harvey for all reading and writing of metadata.
 
-To build the image yourself: `docker build -t geotagger .` in this folder. Releases are built by GitHub Actions: pushing a tag like `v1.0.0` pushes the image to `ghcr.io/tim80732/geotagger` (`:1.0.0` and `:latest`).
+To build the image yourself: `docker build -t geotagger .` in this folder. Releases are built by GitHub Actions: pushing a tag like `v1.0.0` pushes the image to `ghcr.io/tim80732/geotagger` (`:1.0.0` and `:latest`). Add the version's section to [CHANGELOG.md](CHANGELOG.md) first: it becomes the release notes, and the build stops if it's missing.
 
 ## License
 
