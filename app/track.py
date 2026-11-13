@@ -9,42 +9,75 @@ def _client(key):
     return httpx.Client(timeout=60, headers={'Authorization': f'Bearer {key}'}, follow_redirects=True)
 
 
+PER_PAGE = 5000
+
+
 def fetch_dawarich(url, key, start, end, max_accuracy, stop=None):
     """Points as sorted (utc, lat, lon, alt) tuples. stop() is checked between pages."""
     pts = {}
     with _client(key) as c:
-        page, pages = 1, 1
-        while page <= pages and not (stop and stop()):
+        page, last = 1, None
+        while not (stop and stop()):
             r = c.get(f'{url.rstrip("/")}/api/v1/points',
                       params={'start_at': int(start), 'end_at': int(end), 'order': 'asc',
-                              'per_page': 5000, 'page': page})
+                              'per_page': PER_PAGE, 'page': page})
             r.raise_for_status()
-            pages = int(r.headers.get('X-Total-Pages', '1') or 1)
-            for p in r.json():
+            rows = r.json()
+            if rows and rows == last:                # the server ignores 'page': don't loop forever
+                break
+            last = rows
+            for p in rows:
                 acc = p.get('accuracy')
                 if acc is not None and max_accuracy and acc > max_accuracy:
                     continue
                 alt = p.get('altitude_decimal', p.get('altitude'))
                 pts[int(p['timestamp'])] = (float(p['latitude']), float(p['longitude']),
                                             float(alt) if alt is not None else None)
+            # without a page count (a proxy may drop the header), a short page is the last one
+            pages = r.headers.get('X-Total-Pages')
+            if (page >= int(pages)) if pages else len(rows) < PER_PAGE:
+                break
             page += 1
     return [(t, *v) for t, v in sorted(pts.items())]
 
 
+def fetch_windows(url, key, windows, max_accuracy, stop=None):
+    """fetch_dawarich for each (start, end) window, merged, plus the last and first usable point between two
+    windows: the points either side of a track gap, so its length is reported as if everything were loaded."""
+    tracks = [fetch_dawarich(url, key, a, b, max_accuracy, stop) for a, b in windows]
+    with _client(key) as c:
+        for (_, a), (b, _) in zip(windows, windows[1:]):
+            between = {'start_at': int(a) + 1, 'end_at': int(b) - 1}
+            tracks.append([p for p in (_first_usable(c, url, {**between, 'order': 'desc'}, max_accuracy),
+                                       _first_usable(c, url, {**between, 'order': 'asc'}, max_accuracy)) if p])
+    return merge(*tracks)
+
+
+def _point(p):
+    alt = p.get('altitude_decimal', p.get('altitude'))
+    return int(p['timestamp']), float(p['latitude']), float(p['longitude']), float(alt) if alt is not None else None
+
+
+def _first_usable(c, url, params, max_accuracy):
+    """The first point within the accuracy limit, paging past inaccurate ones (up to 10,000)."""
+    for page in range(1, 21):
+        r = c.get(f'{url.rstrip("/")}/api/v1/points', params={**params, 'per_page': 500, 'page': page})
+        r.raise_for_status()
+        rows = r.json()
+        for p in rows:
+            acc = p.get('accuracy')
+            if acc is None or not max_accuracy or acc <= max_accuracy:
+                return _point(p)
+        if len(rows) < 500:
+            break
+    return None
+
+
 def nearest_dawarich(url, key, t, max_accuracy):
     """The last usable point at or before t and the first one after it, from the whole history."""
-    def first(params):
-        with _client(key) as c:
-            r = c.get(f'{url.rstrip("/")}/api/v1/points', params={**params, 'per_page': 50})
-            r.raise_for_status()
-            for p in r.json():
-                acc = p.get('accuracy')
-                if acc is not None and max_accuracy and acc > max_accuracy:
-                    continue
-                return (int(p['timestamp']), float(p['latitude']), float(p['longitude']), None)
-        return None
-    before = first({'end_at': int(t), 'order': 'desc'})
-    after = first({'start_at': int(t) + 1, 'order': 'asc'})
+    with _client(key) as c:
+        before = _first_usable(c, url, {'end_at': int(t), 'order': 'desc'}, max_accuracy)
+        after = _first_usable(c, url, {'start_at': int(t) + 1, 'order': 'asc'}, max_accuracy)
     return before, after
 
 

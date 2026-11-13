@@ -49,7 +49,7 @@ docker run -d --name geotagger -p 8790:8000 \
 
 The container runs as root, because only a file's owner or root may set its Date modified, and photos copied in by different users have different owners. New `.xmp` sidecars get the owner of their photo. You can run it as a normal user with `--user <uid>:<gid>` (the app data folder must be writable by that user), but then photos owned by anyone else get GPS with today's Date modified; those are listed under Errors.
 
-The web UI has no login: keep it on your LAN and don't forward the port.
+The web UI has no login: keep it on your LAN and don't forward the port. It refuses changes sent by other websites open in your browser, and *Test connection* only sends the saved API key to the saved Dawarich address.
 
 | Variable | Default | |
 |---|---|---|
@@ -69,9 +69,11 @@ Dawarich URL and key can also be set (and tested) in the Settings page, which al
 
 Photos without a timezone in their EXIF are skipped by default, or can be read with an offset you choose.
 
+A dry run leaves out files it can't handle safely, and lists them: a name with a line break in it, or a symlink (photo or sidecar) that points outside the photo folders.
+
 Writing rewrites each JPG in place, so a big batch on slow or nearly full storage takes a while. Tagging RAW files only writes small `.xmp` sidecars and is quick. Geotagger keeps no copies of your photos: have a backup of the library.
 
-If the container is killed in the middle of a photo (power loss, or a stop that takes longer than Docker waits), the job stays paused when it starts again and names the photo. Its Date modified is put back when the job resumes. Next to it is an exiftool temporary file ending in `_exiftool_tmp`. If the photo looks right all the way to the bottom, delete the temporary file. If not, replace the photo with the temporary file (remove `_exiftool_tmp` from its name). Then resume.
+If the container is killed in the middle of a photo (power loss, or a stop that takes longer than Docker waits), the job stays paused when it starts again and names the photo. Its Date modified is put back when the job resumes. Next to it is an exiftool temporary file ending in `_exiftool_tmp`. If the photo looks right all the way to the bottom, delete the temporary file. If not, replace the photo with the temporary file (remove `_exiftool_tmp` from its name). Then resume. Until the temporary file is gone, the job can't be deleted or re-run, as it's the only place that names the photo.
 
 ## How it's built
 

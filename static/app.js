@@ -295,7 +295,9 @@ function folderLine(job) {
 function viewScanning(view, job) {
   const bar = h('div'), phase = h('p', { class: 'sub' }), stats = h('div', { class: 'stats' }), err = h('div');
   const kicker = h('div', { class: 'kicker' });
-  const again = async () => { await api(`/jobs/${job.id}/rescan`, { method: 'POST' }); render(); };
+  const again = async () => {
+    try { await api(`/jobs/${job.id}/rescan`, { method: 'POST' }); render(); } catch (e) { alert(e.message); }
+  };
   const cancelBtn = h('button', { class: 'btn danger', type: 'button', onclick: async () => {
     if (!confirm('Cancel this dry run? Nothing has been written, so you can run it again any time.')) return;
     cancelBtn.disabled = true;
@@ -368,6 +370,12 @@ async function viewResults(view, job) {
   else if (job.status === 'cancelled' || job.status === 'failed') {
     topCard = h('div', { class: 'note err' }, job.status === 'failed' ? `Writing failed: ${job.error || ''}` : 'Writing was cancelled. Files already written keep their new GPS; write again to finish the rest.');
   }
+  else if (job.result && job.result.unsafe) {
+    const one = job.result.unsafe === 1;
+    topCard = h('div', { class: 'note' }, `${n(job.result.unsafe)} ${one ? 'file was' : 'files were'} left out because `
+      + `${one ? 'its name has a line break or it points' : 'their name has a line break or they point'} outside the photo `
+      + `folders: ${job.result.unsafe_names.join(', ')}${job.result.unsafe > 20 ? ' …' : ''}`);
+  }
 
   // ---- header
   const toWrite = s.to_write;
@@ -416,7 +424,9 @@ async function viewResults(view, job) {
       h('div', { class: 'actions' },
         h('a', { class: 'btn', href: `/api/jobs/${id}/csv` }, 'Download CSV'),
         h('button', { class: 'btn', type: 'button', disabled: busy, title: 'Read the photos and the track again',
-          onclick: async () => { await api(`/jobs/${id}/rescan`, { method: 'POST' }); render(); } }, 'Re-run dry run'),
+          onclick: async () => {
+            try { await api(`/jobs/${id}/rescan`, { method: 'POST' }); render(); } catch (e) { alert(e.message); }
+          } }, 'Re-run dry run'),
         writeBtn)),
     tiles,
     h('section', { class: 'card', style: 'overflow:hidden', 'aria-labelledby': 'map-h' },
@@ -778,7 +788,9 @@ async function viewJobs(view) {
         h('td', { class: 'rowactions', style: 'text-align:right;white-space:nowrap' },
           h('a', { href: `#/job/${j.id}`, onclick: (e) => e.stopPropagation() }, 'Open'), ' ',
           busy ? null : h('button', { class: 'btn small danger', type: 'button', style: 'margin-left:12px',
-            onclick: async (e) => { e.stopPropagation(); if (confirm(`Delete job #${j.id}? Photos are not touched.`)) { await api(`/jobs/${j.id}`, { method: 'DELETE' }); render(); } } }, 'Delete')));
+            onclick: async (e) => { e.stopPropagation(); if (confirm(`Delete job #${j.id}? Photos are not touched.`)) {
+              try { await api(`/jobs/${j.id}`, { method: 'DELETE' }); render(); } catch (err) { alert(err.message); }
+            } } }, 'Delete')));
     });
     // the list is redrawn every 2 s while a job runs; keep the table's sideways scroll where the user left it
     const oldWrap = view.querySelector('.tablewrap');
@@ -855,7 +867,7 @@ async function viewSettings(view) {
   async function save() {
     const body = { ...s, dawarich_key: key };
     delete body.dawarich_key_set;
-    SETTINGS = await api('/settings', { method: 'PUT', body });
+    try { SETTINGS = await api('/settings', { method: 'PUT', body }); } catch (e) { alert(e.message); return; }
     NEW = null;
     sideFoot();
     saveBtn.textContent = 'Saved';

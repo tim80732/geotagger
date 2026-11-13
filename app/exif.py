@@ -40,6 +40,9 @@ class ExifTool:
     def run(self, args):
         """Run one command; returns (stdout bytes, stderr text). An exiftool that doesn't answer within
         the time limit is killed (the next command starts a fresh one) and TimeoutError is raised."""
+        # exiftool reads one argument per line: a line break inside one (a file name) would add options
+        if any('\n' in a or '\r' in a for a in args):
+            raise ValueError('a file name with a line break in it can\'t be passed to exiftool safely')
         with self.lock:
             if not self.proc or self.proc.poll() is not None:
                 self._start()

@@ -40,9 +40,14 @@ def match(photos, pts, max_gap_s, nearest_s):
             alt = None
             if before[3] is not None and after[3] is not None:
                 alt = before[3] + (after[3] - before[3]) * k
+            # longitude the short way round, also across the ±180° line
+            dlon = after[2] - before[2]
+            dlon += -360 if dlon > 180 else 360 if dlon < -180 else 0
+            lon = before[2] + dlon * k
+            lon += -360 if lon > 180 else 360 if lon < -180 else 0
             ph.update(m_status='interp',
                       m_lat=before[1] + (after[1] - before[1]) * k,
-                      m_lon=before[2] + (after[2] - before[2]) * k,
+                      m_lon=lon,
                       m_alt=alt, gap_s=min(t - before[0], after[0] - t), bracket_s=span)
             continue
         near = min((p for p in (before, after) if p), key=lambda p: abs(p[0] - t))
@@ -58,7 +63,7 @@ def match(photos, pts, max_gap_s, nearest_s):
 def mark_frozen(photos, frozen_min):
     """Camera GPS that stays on the exact same spot for a long run of photos."""
     for kind in {p['kind'] for p in photos}:
-        seq = sorted((p for p in photos if p['kind'] == kind and p.get('cam_lat') is not None
+        seq = sorted((p for p in photos if p['kind'] == kind and None not in (p.get('cam_lat'), p.get('cam_lon'))
                       and p.get('utc') is not None and not p.get('ours')), key=lambda p: p['utc'])
         run = []
         for p in seq + [None]:
@@ -73,12 +78,13 @@ def mark_frozen(photos, frozen_min):
 
 
 def camera_diff(ph):
-    if ph.get('cam_lat') is None or ph.get('ours') or ph.get('m_lat') is None:
+    if None in (ph.get('cam_lat'), ph.get('cam_lon'), ph.get('m_lat')) or ph.get('ours'):
         return None
     return distance_m(ph['cam_lat'], ph['cam_lon'], ph['m_lat'], ph['m_lon'])
 
 
-GAP_TEXT = {'outside': 'Outside the track', 'notime': 'No capture time', 'notz': 'No timezone in EXIF'}
+GAP_TEXT = {'outside': 'Outside the track', 'notime': 'No capture time', 'notz': 'No timezone in EXIF',
+            'badtz': 'Unreadable timezone'}
 
 
 def decide(ph, has_gps_policy, manual):

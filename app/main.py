@@ -2,13 +2,18 @@ import csv
 import hashlib
 import io
 import json
+import math
 import os
+import re
+import shutil
+import threading
 import time
+from urllib.parse import urlsplit
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import matcher, track
@@ -36,6 +41,34 @@ DEFAULTS = {
 }
 OPTION_KEYS = ['source', 'subfolders', 'max_gap_min', 'nearest_min', 'max_accuracy_m', 'warn_km', 'frozen_min',
                'has_gps', 'no_tz', 'assume_offset']
+CHOICES = {'source': ('dawarich', 'gpx'), 'types': ('both', 'jpg', 'raw'), 'has_gps': ('replace', 'keep'),
+           'no_tz': ('skip', 'assume')}
+
+
+def checked(values):
+    """Settings and job options as the types the matcher expects; anything else is refused."""
+    out = {}
+    for k, v in values.items():
+        d = DEFAULTS[k]
+        if k in CHOICES:
+            if v not in CHOICES[k]:
+                raise HTTPException(400, f'{k} must be one of: {", ".join(CHOICES[k])}.')
+        elif isinstance(d, bool):
+            if not isinstance(v, bool):
+                raise HTTPException(400, f'{k} must be true or false.')
+        elif isinstance(d, (int, float)):
+            try:
+                v = float(v)
+            except (TypeError, ValueError):
+                raise HTTPException(400, f'{k} must be a number.')
+            if not math.isfinite(v) or v < 0:
+                raise HTTPException(400, f'{k} must be zero or more.')
+        elif not isinstance(v, str):
+            raise HTTPException(400, f'{k} must be text.')
+        elif k == 'assume_offset' and not re.fullmatch(r'[+-](0\d|1[0-4]):[0-5]\d', v):
+            raise HTTPException(400, 'The assumed offset must look like +02:00 or -05:00.')
+        out[k] = v
+    return out
 
 db = DB(os.path.join(DATA, 'geotagger.db'))
 exif = ExifTool()          # jobs
@@ -46,13 +79,26 @@ def settings():
     return db.get_settings(DEFAULTS)
 
 
-runner = Runner(db, exif, settings, DATA)
+runner = Runner(db, exif, settings, DATA, ROOTS)
 app = FastAPI(title='Geotagger')
 
 
 @app.on_event('shutdown')
 def stop_writing():
     runner.shutdown()
+
+
+@app.middleware('http')
+async def same_site_only(request, call_next):
+    """Refuse changes sent by another web page open in your browser (it could start a write, or point
+    Test connection at its own server). Browsers say where a request comes from; curl and scripts don't."""
+    if request.method not in ('GET', 'HEAD', 'OPTIONS'):
+        site = request.headers.get('sec-fetch-site')
+        origin = request.headers.get('origin')
+        if (site and site not in ('same-origin', 'none')) or \
+                (origin and urlsplit(origin).netloc != request.headers.get('host')):
+            return JSONResponse({'detail': 'Refused: this request came from another website.'}, status_code=403)
+    return await call_next(request)
 
 
 @app.middleware('http')
@@ -84,7 +130,7 @@ def get_settings():
 @app.put('/api/settings')
 async def put_settings(request: Request):
     body = await request.json()
-    values = {k: v for k, v in body.items() if k in DEFAULTS}
+    values = checked({k: v for k, v in body.items() if k in DEFAULTS})
     if not values.get('dawarich_key'):
         values.pop('dawarich_key', None)          # empty = keep the current key
     db.set_settings(values)
@@ -95,8 +141,14 @@ async def put_settings(request: Request):
 async def test_connection(request: Request):
     body = await request.json()
     s = settings()
-    url = body.get('dawarich_url') or s['dawarich_url']
-    key = body.get('dawarich_key') or s['dawarich_key']
+    url = (body.get('dawarich_url') or s['dawarich_url'] or '').rstrip('/')
+    key = body.get('dawarich_key')
+    if not key:
+        # the saved key only ever goes to the saved address
+        if url and url != (s['dawarich_url'] or '').rstrip('/'):
+            return {'ok': False, 'message': 'Enter the API key to test a different Dawarich address. '
+                                            'The saved key is only sent to the saved address.'}
+        key = s['dawarich_key']
     if not url or not key:
         return {'ok': False, 'message': 'Enter the Dawarich URL and API key first.'}
     try:
@@ -128,8 +180,8 @@ async def upload_gpx(files: list[UploadFile]):
     for f in files:
         gid = db.x('INSERT INTO gpx (name, added) VALUES (?, ?)', (f.filename, time.time()))
         path = os.path.join(DATA, 'gpx', f'{gid}.gpx')
-        with open(path, 'wb') as out:
-            out.write(await f.read())
+        with open(path, 'wb') as out:                       # straight to disk, not into memory first
+            await run_in_threadpool(shutil.copyfileobj, f.file, out, 1 << 20)
         try:
             pts = await run_in_threadpool(track.parse_gpx, path)
         except Exception as e:                               # noqa: BLE001
@@ -241,9 +293,10 @@ async def create_job(request: Request):
     if not folders:
         raise HTTPException(400, 'Choose at least one folder.')
     s = settings()
-    opts = {k: body.get('options', {}).get(k, s[k]) for k in OPTION_KEYS}
+    opts = checked({k: body.get('options', {}).get(k, s[k]) for k in OPTION_KEYS})
+    types = checked({'types': body.get('types', s['types'])})['types']
     jid = db.x('INSERT INTO jobs (created, folders, types, options, status) VALUES (?, ?, ?, ?, ?)',
-               (time.time(), json.dumps(folders), body.get('types', s['types']), json.dumps(opts), 'queued'))
+               (time.time(), json.dumps(folders), types, json.dumps(opts), 'queued'))
     runner.submit(jid, 'scan')
     return job_out(db.job(jid), summary=False)
 
@@ -277,9 +330,25 @@ def delete_job(jid: int):
     job = get_job(jid)
     if job['status'] in ('scanning', 'writing', 'queued'):
         raise HTTPException(409, 'Stop the job first.')
+    keep_recovery_info(jid)
     db.x('DELETE FROM photos WHERE job_id = ?', (jid,))
     db.x('DELETE FROM jobs WHERE id = ?', (jid,))
+    track_file = os.path.join(DATA, 'tracks', f'{jid}.json')
+    if os.path.exists(track_file):
+        os.remove(track_file)
     return {'ok': True}
+
+
+def keep_recovery_info(jid):
+    """A job whose write was cut off in the middle of a photo is the only place that says which photo
+    to check, so it can't be deleted or re-run while the exiftool temporary file is still there."""
+    left = runner.unresolved(jid)
+    if left:
+        names = ', '.join(os.path.basename(p) for p in left[:5]) + (f' and {len(left) - 5} more' if len(left) > 5 else '')
+        raise HTTPException(409, f'Writing was cut off in the middle of {names}, and its temporary file '
+                                 f'(name ending in _exiftool_tmp) is still next to it. If the photo looks right all the '
+                                 f'way to the bottom, delete the temporary file; if not, delete the photo and remove '
+                                 f'_exiftool_tmp from the temporary file\'s name. Then try again.')
 
 
 FILTERS = {
@@ -386,6 +455,8 @@ def start_write(jid: int):
     job = get_job(jid)
     if job['status'] not in ('ready', 'done', 'paused', 'cancelled', 'failed'):
         raise HTTPException(409, f'The job is {job["status"]}.')
+    if (job['result'] or {}).get('track_points') is None:
+        raise HTTPException(409, 'The dry run for this job didn\'t finish. Run it again first.')
     if job['status'] != 'paused':
         result = job['result'] or {}
         result.pop('write_started', None)
@@ -410,6 +481,7 @@ def control(jid: int, action: str):
         return start_write(jid)
     elif action == 'rescan':
         editable(job)
+        keep_recovery_info(jid)
         db.x('DELETE FROM photos WHERE job_id = ?', (jid,))
         db.update_job(jid, result=None, done=0, total=0)
         runner.submit(jid, 'scan')
@@ -476,8 +548,11 @@ def thumb(pid: int):
         data = exif_ui.binary(ph['path'], 'ThumbnailImage') or exif_ui.binary(ph['path'], 'PreviewImage')
         if not data:
             raise HTTPException(404)
-        with open(cache, 'wb') as f:
+        # write it next to the cache and swap it in, so a second request never gets half a file
+        tmp = f'{cache}.{threading.get_ident()}.tmp'
+        with open(tmp, 'wb') as f:
             f.write(data)
+        os.replace(tmp, cache)
     return FileResponse(cache, media_type='image/jpeg', headers={'Cache-Control': 'max-age=86400'})
 
 
